@@ -1,4 +1,7 @@
+#include <cstdio>
 #include <iostream>
+#include <sstream>
+#include <string>
 
 // This is the first gcc header to be included
 #include "gcc-plugin.h"
@@ -30,6 +33,20 @@ static struct plugin_info my_gcc_plugin_info = {
 
 namespace
 {
+std::string
+escapeDoubleQuotes( const std::string& toEscape )
+{
+    std::string result;
+    for ( const auto c : toEscape ) {
+        if ( c == '"' ) {
+            result += '\\';
+        }
+        result += c;
+    }
+    return result;
+}
+
+
 const pass_data my_first_pass_data =
 {
     GIMPLE_PASS,
@@ -43,44 +60,53 @@ const pass_data my_first_pass_data =
     0                       /* todo_flags_finish */
 };
 
-struct my_first_pass : gimple_opt_pass
+struct my_first_pass :
+    public gimple_opt_pass
 {
-    my_first_pass(gcc::context *ctx)
-        : gimple_opt_pass(my_first_pass_data, ctx)
+public:
+    my_first_pass(gcc::context *ctx) :
+        gimple_opt_pass(my_first_pass_data, ctx),
+        m_tmpFile( fopen( "temporary-file-for-dumpying-gimple-sequence", "w+b" ) )
     {
         std::cerr << "digraph cfg {\n";
     }
 
-    virtual unsigned int execute(function *fun) override
+    virtual unsigned int
+    execute(function *fun) override
     {
         basic_block bb;
 
-        std::cerr << "subgraph fun_" << fun << " {\n";
+        std::cerr << "\nsubgraph fun_" << fun << " {\n";
 
         FOR_ALL_BB_FN(bb, fun)
         {
             gimple_bb_info *bb_info = &bb->il.gimple;
 
-            std::cerr << "bb_" << fun << "_" << bb->index << "[label=\"";
-            if (bb->index == 0)
-            {
-                std::cerr << "ENTRY: "
+            std::cerr << "    bb_" << fun << "_" << bb->index << "[label=\"";
+
+            std::stringstream label;
+            if (bb->index == 0) {
+                label
+                    << "ENTRY: "
                     << function_name(fun) << "\n"
                     << (LOCATION_FILE(fun->function_start_locus) ? : "<unknown>") << ":"
                     << LOCATION_LINE(fun->function_start_locus);
-            }
-            else if (bb->index == 1)
-            {
-                std::cerr << "EXIT: "
+            } else if (bb->index == 1) {
+                label
+                    << "EXIT: "
                     << function_name(fun) << "\n"
                     << (LOCATION_FILE(fun->function_end_locus) ? : "<unknown>") << ":"
                     << LOCATION_LINE(fun->function_end_locus);
+            } else {
+                fseek( m_tmpFile, 0, SEEK_SET );
+                print_gimple_seq(m_tmpFile, bb_info->seq , 0, static_cast<dump_flags_t>(0));
+                const auto writtenCount = ftell( m_tmpFile );
+                fseek( m_tmpFile, 0, SEEK_SET );
+                std::vector<char> buffer( writtenCount );
+                const auto readBytes = fread( buffer.data(), 1, writtenCount, m_tmpFile );
+                label << std::string( buffer.data(), writtenCount );
             }
-            else
-            {
-                print_gimple_seq(stderr, bb_info->seq , 0, static_cast<dump_flags_t>(0));
-            }
-            std::cerr << "\"];\n";
+            std::cerr << escapeDoubleQuotes( std::move( label ).str() ) << "\"];\n\n";
 
             edge e;
             edge_iterator ei;
@@ -88,13 +114,14 @@ struct my_first_pass : gimple_opt_pass
             FOR_EACH_EDGE (e, ei, bb->succs)
             {
                 basic_block dest = e->dest;
-                std::cerr << "bb_" << fun << "_" << bb->index << " -> bb_" << fun << "_" << dest->index << ";\n";
+                std::cerr << "    bb_" << fun << "_" << bb->index << " -> bb_" << fun << "_" << dest->index << ";\n";
             }
+
+            std::cerr << "\n";
         }
 
         std::cerr << "}\n";
 
-        // Nothing special todo
         return 0;
     }
 
@@ -103,6 +130,10 @@ struct my_first_pass : gimple_opt_pass
         // We do not clone ourselves
         return this;
     }
+
+private:
+    /* Worst hack I've done in a while but I don't see an alternative to print_gimple_seq that prints to a buffer. */
+    FILE* m_tmpFile;
 };
 
 
